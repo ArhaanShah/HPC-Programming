@@ -13,6 +13,8 @@ double dx, dy;
 
 int main(void) {
     /* approach: deferred */
+    omp_set_dynamic(0);
+
     int grids[][2] = { {250,100}, {500,200}, {1000,400} };
     int ngrids = 3;
     int thread_counts[] = { 1, 2, 4, 8, 16 };

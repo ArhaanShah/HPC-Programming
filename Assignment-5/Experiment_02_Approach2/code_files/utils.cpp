@@ -7,12 +7,22 @@
 #include "init.h"
 #include "utils.h"
 
-#if defined(_WIN32)
-static unsigned int rand_r(unsigned int *seed) {
-    *seed = (*seed * 1103515245u) + 12345u;
-    return (*seed / 65536u) % 32768u;
+static inline unsigned int rng_next_u32(unsigned int *seed) {
+    unsigned int x = *seed;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *seed = x;
+    return x;
 }
-#endif
+
+static inline double rng_unit(unsigned int *seed) {
+    return (double)rng_next_u32(seed) * (1.0 / 4294967296.0);
+}
+
+static inline double rng_signed_delta(unsigned int *seed, double delta) {
+    return (2.0 * delta) * rng_unit(seed) - delta;
+}
 
 /* ================================================================
  *  INTERPOLATION — bilinear CIC scatter (serial, Haswell-optimized)
@@ -135,15 +145,15 @@ void mover_serial_immediate(Points *points, double deltaX, double deltaY) {
             _mm_prefetch((const char *)&points[i + PF], _MM_HINT_T0);
         }
 
-        double dx_rand = deltaX * (2.0 * ((double)rand_r(&seed) / RAND_MAX) - 1.0);
-        double dy_rand = deltaY * (2.0 * ((double)rand_r(&seed) / RAND_MAX) - 1.0);
+        double dx_rand = rng_signed_delta(&seed, deltaX);
+        double dy_rand = rng_signed_delta(&seed, deltaY);
         double x_new = points[i].x + dx_rand;
         double y_new = points[i].y + dy_rand;
 
         if (x_new < 0.0 || x_new > 1.0 || y_new < 0.0 || y_new > 1.0) {
             /* DELETE + INSERT: replace with random position in domain */
-            points[i].x = (double)rand_r(&seed) / RAND_MAX;
-            points[i].y = (double)rand_r(&seed) / RAND_MAX;
+            points[i].x = rng_unit(&seed);
+            points[i].y = rng_unit(&seed);
         } else {
             points[i].x = x_new;
             points[i].y = y_new;
@@ -156,9 +166,7 @@ void mover_parallel_immediate(Points *points, double deltaX, double deltaY, int 
     const int N = NUM_Points;
     const int PF = 32;
 
-    omp_set_num_threads(nthreads);
-
-    #pragma omp parallel
+    #pragma omp parallel num_threads(nthreads)
     {
         int tid = omp_get_thread_num();
         unsigned int seed = (unsigned int)tid * 1073741827u + 2654435761u;
@@ -169,14 +177,14 @@ void mover_parallel_immediate(Points *points, double deltaX, double deltaY, int 
                 _mm_prefetch((const char *)&points[i + PF], _MM_HINT_T0);
             }
 
-            double dx_rand = deltaX * (2.0 * ((double)rand_r(&seed) / RAND_MAX) - 1.0);
-            double dy_rand = deltaY * (2.0 * ((double)rand_r(&seed) / RAND_MAX) - 1.0);
+            double dx_rand = rng_signed_delta(&seed, deltaX);
+            double dy_rand = rng_signed_delta(&seed, deltaY);
             double x_new = points[i].x + dx_rand;
             double y_new = points[i].y + dy_rand;
 
             if (x_new < 0.0 || x_new > 1.0 || y_new < 0.0 || y_new > 1.0) {
-                points[i].x = (double)rand_r(&seed) / RAND_MAX;
-                points[i].y = (double)rand_r(&seed) / RAND_MAX;
+                points[i].x = rng_unit(&seed);
+                points[i].y = rng_unit(&seed);
             } else {
                 points[i].x = x_new;
                 points[i].y = y_new;
@@ -210,8 +218,8 @@ void mover_serial_deferred(Points *points, double deltaX, double deltaY) {
             _mm_prefetch((const char *)&points[i + PF], _MM_HINT_T0);
         }
 
-        double dx_rand = deltaX * (2.0 * ((double)rand_r(&seed) / RAND_MAX) - 1.0);
-        double dy_rand = deltaY * (2.0 * ((double)rand_r(&seed) / RAND_MAX) - 1.0);
+        double dx_rand = rng_signed_delta(&seed, deltaX);
+        double dy_rand = rng_signed_delta(&seed, deltaY);
         double x_new = points[i].x + dx_rand;
         double y_new = points[i].y + dy_rand;
 
@@ -223,6 +231,10 @@ void mover_serial_deferred(Points *points, double deltaX, double deltaY) {
             points[i].x = x_new;
             points[i].y = y_new;
         }
+    }
+
+    if (deleted_count == 0) {
+        return;
     }
 
     /* Phase 2: Compact — two-pointer swap pushes voids to end.
@@ -243,8 +255,8 @@ void mover_serial_deferred(Points *points, double deltaX, double deltaY) {
     /* Phase 3: Insert new particles at the void positions [N-deleted, N) */
     int start_insert = N - deleted_count;
     for (int i = start_insert; i < N; i++) {
-        points[i].x = (double)rand_r(&seed) / RAND_MAX;
-        points[i].y = (double)rand_r(&seed) / RAND_MAX;
+        points[i].x = rng_unit(&seed);
+        points[i].y = rng_unit(&seed);
     }
 }
 
@@ -253,12 +265,10 @@ void mover_parallel_deferred(Points *points, double deltaX, double deltaY, int n
     const int N = NUM_Points;
     const int PF = 32;
 
-    omp_set_num_threads(nthreads);
-
     int total_deleted = 0;
 
     /* Phase 1: Move and mark (parallel) — embarrassingly parallel */
-    #pragma omp parallel reduction(+:total_deleted)
+    #pragma omp parallel num_threads(nthreads) reduction(+:total_deleted)
     {
         int tid = omp_get_thread_num();
         unsigned int seed = (unsigned int)tid * 1073741827u + 2654435761u;
@@ -269,8 +279,8 @@ void mover_parallel_deferred(Points *points, double deltaX, double deltaY, int n
                 _mm_prefetch((const char *)&points[i + PF], _MM_HINT_T0);
             }
 
-            double dx_rand = deltaX * (2.0 * ((double)rand_r(&seed) / RAND_MAX) - 1.0);
-            double dy_rand = deltaY * (2.0 * ((double)rand_r(&seed) / RAND_MAX) - 1.0);
+            double dx_rand = rng_signed_delta(&seed, deltaX);
+            double dy_rand = rng_signed_delta(&seed, deltaY);
             double x_new = points[i].x + dx_rand;
             double y_new = points[i].y + dy_rand;
 
@@ -283,6 +293,10 @@ void mover_parallel_deferred(Points *points, double deltaX, double deltaY, int n
                 points[i].y = y_new;
             }
         }
+    }
+
+    if (total_deleted == 0) {
+        return;
     }
 
     /* Phase 2: Compact — serial two-pointer swap.
@@ -315,15 +329,15 @@ void mover_parallel_deferred(Points *points, double deltaX, double deltaY, int n
     /* Phase 3: Insert new particles (parallel) */
     int start_insert = N - total_deleted;
 
-    #pragma omp parallel
+    #pragma omp parallel num_threads(nthreads)
     {
         int tid = omp_get_thread_num();
         unsigned int seed = (unsigned int)tid * 2654435761u + 1073741827u;
 
         #pragma omp for schedule(static)
         for (int i = start_insert; i < N; i++) {
-            points[i].x = (double)rand_r(&seed) / RAND_MAX;
-            points[i].y = (double)rand_r(&seed) / RAND_MAX;
+            points[i].x = rng_unit(&seed);
+            points[i].y = rng_unit(&seed);
         }
     }
 }
@@ -335,9 +349,7 @@ void mover_parallel_no_delete(Points *points, double deltaX, double deltaY, int 
     const int N = NUM_Points;
     const int PF = 32;
 
-    omp_set_num_threads(nthreads);
-
-    #pragma omp parallel
+    #pragma omp parallel num_threads(nthreads)
     {
         int tid = omp_get_thread_num();
         unsigned int seed = (unsigned int)tid * 1073741827u + 2654435761u;
@@ -348,14 +360,22 @@ void mover_parallel_no_delete(Points *points, double deltaX, double deltaY, int 
                 _mm_prefetch((const char *)&points[i + PF], _MM_HINT_T0);
             }
 
-            double dx_rand = deltaX * (2.0 * ((double)rand_r(&seed) / RAND_MAX) - 1.0);
-            double dy_rand = deltaY * (2.0 * ((double)rand_r(&seed) / RAND_MAX) - 1.0);
+            double dx_rand = rng_signed_delta(&seed, deltaX);
+            double dy_rand = rng_signed_delta(&seed, deltaY);
             double x_new = points[i].x + dx_rand;
             double y_new = points[i].y + dy_rand;
 
-            /* Periodic wrap-around: x - floor(x) maps any real to [0, 1) */
-            x_new = x_new - floor(x_new);
-            y_new = y_new - floor(y_new);
+            /* Displacements are strictly within (-1, 1), so one wrap step is sufficient. */
+            if (x_new < 0.0) {
+                x_new += 1.0;
+            } else if (x_new >= 1.0) {
+                x_new -= 1.0;
+            }
+            if (y_new < 0.0) {
+                y_new += 1.0;
+            } else if (y_new >= 1.0) {
+                y_new -= 1.0;
+            }
 
             points[i].x = x_new;
             points[i].y = y_new;
